@@ -5,36 +5,42 @@ const c = @cImport({
 
 const std = @import("std");
 
+const log_file_path = "gl.log";
+const file_log = std.log.scoped(.log_to_file);
+
 pub fn main() !void {
+    file_log.info("{s}", c.glfwGetVersion());
+    _ = c.glfwSetErrorCallback(errorCallback);
     if (c.glfwInit() == c.GLFW_FALSE) {
-        std.log.err("failed to init glfw", .{});
-        return error.Init;
+        file_log.err("failed to init glfw", .{});
+        return error.Initialisation;
     }
     defer c.glfwTerminate();
 
-    _ = c.glfwSetErrorCallback(errorCallback);
-
     c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 4);
     c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MINOR, 6);
+    c.glfwWindowHint(c.GLFW_OPENGL_FORWARD_COMPAT, c.GL_TRUE);
     c.glfwWindowHint(c.GLFW_OPENGL_PROFILE, c.GLFW_OPENGL_CORE_PROFILE);
 
     const window = c.glfwCreateWindow(800, 600, "zixle", null, null) orelse {
-        std.log.err("failed to create glfw window", .{});
+        file_log.err("failed to create glfw window", .{});
         c.glfwTerminate();
         return error.Init;
     };
     defer c.glfwDestroyWindow(window);
 
+    _ = c.glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
+
     c.glfwMakeContextCurrent(window);
     if (c.gladLoadGL() == 0) {
-        std.log.err("failed to init glad", .{});
+        file_log.err("failed to init glad", .{});
         return error.Init;
     }
 
     const points = [_]f32{
-        0.0, 0.5, 0.0, // top middle
-        0.5, -0.5, 0.0, // bottom right
-        -0.5, -0.5, 0.0, // bottom left
+        0.0, 1.0, 0.0, // top middle
+        1.0, -1.0, 0.0, // bottom right
+        -1.0, -1.0, 0.0, // bottom left
     };
 
     c.glEnable(c.GL_DEBUG_OUTPUT);
@@ -72,7 +78,7 @@ pub fn main() !void {
     c.glGetProgramiv(shader_program, c.GL_LINK_STATUS, &success);
     if (success == 0) {
         c.glGetProgramInfoLog(shader_program, 512, null, &log);
-        std.debug.print("{s}", .{log});
+        file_log.err("{s}", .{log});
     }
 
     while (c.glfwWindowShouldClose(window) == 0) {
@@ -98,10 +104,61 @@ fn glDebugCallback(source: c.GLenum, typ: c.GLenum, id: c.GLuint, severity: c.GL
     if (typ != c.GL_DEBUG_TYPE_ERROR) {
         return;
     }
-    std.log.err("{s}", .{message});
+    file_log.err("{s}", .{message});
 }
 
 fn errorCallback(err: c_int, desc: [*c]const u8) callconv(.C) void {
-    _ = err;
-    std.log.err("{s}", .{desc});
+    file_log.err("{d}: {s}", .{ err, desc });
+}
+
+fn framebufferSizeCallback(window: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
+    _ = window;
+    c.glViewport(0, 0, width, height);
+}
+
+// custom logging
+pub const std_options = .{
+    .logFn = myLogFn,
+
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .log_to_file, .level = std.log.default_level },
+    },
+};
+
+pub fn myLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (scope == .log_to_file) {
+        const prefix = "[" ++ comptime level.asText() ++ "] ";
+
+        var file = std.fs.cwd().createFile(log_file_path, .{}) catch return;
+        defer file.close();
+
+        const stat = file.stat() catch return;
+        file.seekTo(stat.size) catch return;
+
+        const fwriter = file.writer();
+        var bw = std.io.bufferedWriter(fwriter);
+
+        bw.writer().print(prefix ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+        return;
+    }
+
+    // default log func
+    const level_txt = comptime level.asText();
+    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    const stderr = std.io.getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.getStderrMutex().lock();
+    defer std.debug.getStderrMutex().unlock();
+    nosuspend {
+        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+    }
 }
