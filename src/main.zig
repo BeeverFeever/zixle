@@ -1,16 +1,20 @@
-const c = @cImport({
-    @cInclude("glad/glad.h");
-    @cInclude("GLFW/glfw3.h");
-});
-
 const std = @import("std");
+const c = @import("c.zig");
+const Shader = @import("Shader.zig");
 
-const log_file_path = "gl.log";
 const file_log = std.log.scoped(.log_to_file);
+const log_file_path = "gl.log";
+const win_width = 800;
+const win_height = 600;
 
 pub fn main() !void {
-    file_log.info("{s}", c.glfwGetVersion());
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    file_log.info("{s}", .{c.glfwGetVersionString()});
     _ = c.glfwSetErrorCallback(errorCallback);
+
     if (c.glfwInit() == c.GLFW_FALSE) {
         file_log.err("failed to init glfw", .{});
         return error.Initialisation;
@@ -22,7 +26,9 @@ pub fn main() !void {
     c.glfwWindowHint(c.GLFW_OPENGL_FORWARD_COMPAT, c.GL_TRUE);
     c.glfwWindowHint(c.GLFW_OPENGL_PROFILE, c.GLFW_OPENGL_CORE_PROFILE);
 
-    const window = c.glfwCreateWindow(800, 600, "zixle", null, null) orelse {
+    c.glfwWindowHint(c.GLFW_SAMPLES, 4);
+
+    const window = c.glfwCreateWindow(win_width, win_height, "zixle", null, null) orelse {
         file_log.err("failed to create glfw window", .{});
         c.glfwTerminate();
         return error.Init;
@@ -38,59 +44,50 @@ pub fn main() !void {
     }
 
     const points = [_]f32{
-        0.0, 1.0, 0.0, // top middle
-        1.0, -1.0, 0.0, // bottom right
         -1.0, -1.0, 0.0, // bottom left
+        -1.0, 1.0, 0.0, // top left
+        1.0, -1.0, 0.0, // bottom right
+        1.0, 1.0, 0.0, // top right
     };
 
     c.glEnable(c.GL_DEBUG_OUTPUT);
     c.glDebugMessageCallback(glDebugCallback, null);
 
-    var vbo: c_uint = undefined;
-    c.glGenBuffers(1, &vbo);
-    c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
-    c.glBufferData(c.GL_ARRAY_BUFFER, 9 * @sizeOf(f32), &points, c.GL_STATIC_DRAW);
-
     var vao: c_uint = undefined;
+    var vbo: c_uint = undefined;
     c.glGenVertexArrays(1, &vao);
-    c.glBindVertexArray(vao);
-    c.glEnableVertexAttribArray(0);
+    c.glGenBuffers(1, &vbo);
+
     c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
+    c.glBufferData(c.GL_ARRAY_BUFFER, points.len * @sizeOf(@TypeOf(points[0])), &points, c.GL_STATIC_DRAW);
+
+    c.glBindVertexArray(vao);
     c.glVertexAttribPointer(0, 3, c.GL_FLOAT, c.GL_FALSE, 0, null);
+    c.glEnableVertexAttribArray(0);
+    c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
 
-    var log: [512]u8 = undefined;
-    var success: c_int = undefined;
+    const shader = try Shader.init("src/shaders/triangle.vert", "src/shaders/triangle.frag", alloc);
+    defer _ = shader.deinit();
 
-    const frag_shader: [*c]const u8 = @embedFile("shaders/triangle.frag");
-    const fs = c.glCreateShader(c.GL_FRAGMENT_SHADER);
-    c.glShaderSource(fs, 1, &frag_shader, null);
-    c.glCompileShader(fs);
-
-    const vert_shader: [*c]const u8 = @embedFile("shaders/triangle.vert");
-    const vs = c.glCreateShader(c.GL_VERTEX_SHADER);
-    c.glShaderSource(vs, 1, &vert_shader, null);
-    c.glCompileShader(vs);
-
-    const shader_program = c.glCreateProgram();
-    c.glAttachShader(shader_program, fs);
-    c.glAttachShader(shader_program, vs);
-    c.glLinkProgram(shader_program);
-    c.glGetProgramiv(shader_program, c.GL_LINK_STATUS, &success);
-    if (success == 0) {
-        c.glGetProgramInfoLog(shader_program, 512, null, &log);
-        file_log.err("{s}", .{log});
-    }
+    // texture
+    var width: c_int = undefined;
+    var height: c_int = undefined;
+    var chan_count: c_int = undefined;
+    const data = c.stbi_load("../polyscape_2.png", &width, &height, &chan_count, 0);
+    _ = data;
 
     while (c.glfwWindowShouldClose(window) == 0) {
         defer c.glfwPollEvents();
         defer c.glfwSwapBuffers(window);
-
         c.glClearColor(0.18, 0.18, 0.18, 1.0);
         c.glClear(c.GL_COLOR_BUFFER_BIT);
 
-        c.glUseProgram(shader_program);
+        const time: f32 = @floatCast(c.glfwGetTime());
+        shader.use();
+        shader.uniform2f("u_resolution", [2]f32{ win_width, win_height });
+        shader.uniform1f("u_time", time);
         c.glBindVertexArray(vao);
-        c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
+        c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
     }
 }
 
@@ -125,7 +122,7 @@ pub const std_options = .{
     },
 };
 
-pub fn myLogFn(
+fn myLogFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
     comptime format: []const u8,
@@ -134,7 +131,7 @@ pub fn myLogFn(
     if (scope == .log_to_file) {
         const prefix = "[" ++ comptime level.asText() ++ "] ";
 
-        var file = std.fs.cwd().createFile(log_file_path, .{}) catch return;
+        var file = std.fs.cwd().createFile(log_file_path, .{ .truncate = false }) catch return;
         defer file.close();
 
         const stat = file.stat() catch return;
